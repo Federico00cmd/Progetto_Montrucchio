@@ -509,51 +509,107 @@ def expand_gate(U_gate, n, targets):
     Returns:
       U_full  : The full 2^n x 2^n matrix representing the gate acting on the specified targets.
     """
+    if not isinstance(targets, list):
+        targets = [targets]
+    print("Targets:" ,targets)
     I = np.eye(2, dtype=complex)  # The single-qubit identity matrix.
     U_full = 1  # Start with a scalar 1 for the tensor product.
+    if len(targets) == 1:
+        #we have no a control operation
+        for i in range(n ):
+            if i in targets:
+                U_full = np.kron(U_full, U_gate)  # Place the gate at this qubit.
+            else:
+                U_full = np.kron(U_full, I)  # Place the identity on qubits that are not targeted.
+    else:
+        control_qubit = targets[0]
+        target_qubit = targets[1]
+        control_matrix = U_gate[:2, :2]
+        target_matrix = U_gate[2:, 2:]
+        print("\n\n", target_matrix)
+        #we have a control operation
+        for i in range(n ):
+            if i in targets:
+                if i == control_qubit:
+                    U_full = np.kron(U_full, control_matrix)  # Place the gate at this qubit.
+                else:
+                    U_full = np.kron(U_full, target_matrix)
+            else:
+                U_full = np.kron(U_full, I)  # Place the identity on qubits that are not targeted.
 
-    for i in range(n):
-        if i in targets:
-            U_full = np.kron(U_full, U_gate)  # Place the gate at this qubit.
-        else:
-            U_full = np.kron(U_full, I)  # Place the identity on qubits that are not targeted.
-    
     return U_full
 
 def evolve_internal_new(group, list_qc_ordered, tot_qubits, T_decoherence, decoherence = True):
 
-    circuit = list_qc_ordered[0]
+    """
+    Evolves a quantum system by applying a sequence of quantum gates to the qubits in the specified group.
+
+    The function processes the gates in the `list_qc_ordered`, which are applied in sequence to the qubits 
+    belonging to the `group`. Each gate is expanded to the full Hilbert space of the system, and decoherence 
+    can be optionally applied to each gate using the provided `T_decoherence` parameter.
+
+    Parameters:
+    - group (list): A list of qubits that the function can operate on.
+    - list_qc_ordered (list): A list of quantum circuit operations, where each operation is represented 
+      as [gate_name, target_qubits, parameters, gate_qubit_index].
+    - tot_qubits (int): The total number of qubits in the quantum system.
+    - T_decoherence (float): A parameter representing the decoherence time.
+    - decoherence (bool, optional): If True, applies decoherence to the quantum operations. Defaults to True.
+
+    Returns:
+    - np.ndarray: The total unitary evolution matrix representing the system's evolution after applying 
+      the sequence of gates.
+
+    Note:
+    - The function assumes that `gates` is a dictionary containing matrix representations for each gate 
+      (e.g., `rx`, `rz`, `cx`, `h`, etc.).
+    - Decoherence is applied by modifying the gate matrices before expanding them to the full system size.
+    - The evolution is accumulated in a matrix `U_internal`, which is multiplied by each gate's expanded form.
+    """
     # list_qc_ordered example: [['cx', [0, 1], [], 0], ['h', 2, [], 1], ['x', 4, [], 2], ['x', 5, [], 3], ['x', 4, [], 4]], 0
-    operation = circuit[0]
+    operation = list_qc_ordered[0]
+
     operation_name = operation[0]
     operation_targets = operation[1]
     operation_params = operation[2]
     operation_qubit = operation[3]
     # All the involved qubits are inside the group
 
+    operation_targets_list = [operation_targets]
+    print("\n\n The group is:", group, "\n\n")
     gates = matrices()
     U_internal = np.eye(2 ** tot_qubits)
-    while all(t in group for t in operation_targets):
+    while all(t in group for t in operation_targets_list):
 
+        print(list_qc_ordered)
+        print("operation:", operation)
+        print("operation targets:", operation_targets)
         # rx, rz have also theta as parameter
         if operation_name in ['rx', 'rz']:
             U_gate = gates[operation_name](operation_params)  # call the function to get the evaluated matrix
         else:
-            U_gate = gates[operation_name[0]]
+            U_gate = gates[operation_name]
         
         if decoherence:
             U_gate = apply_decoherence(U = U_gate, T_decoherence= T_decoherence)
-
         U_tot = expand_gate(U_gate = U_gate, n = tot_qubits, targets= operation_targets)
+        
+        print("\n\n The dimension of U_internal is:", U_internal.shape, "while the dimension of the U_tot is:", U_tot.shape)
         U_internal = U_internal @ U_tot
         #remove the done operation
-        circuit.pop(operation)
+        list_qc_ordered.pop(0)
 
         #Fetch a new operation
-        operation = circuit[0]
-        operation_name = operation[0]
-        operation_targets = operation[1]
-        operation_params = operation[2]
+        if list_qc_ordered:
+            operation = list_qc_ordered[0]
+            operation_name = operation[0]
+            operation_targets = operation[1]
+            operation_params = operation[2]
+            operation_targets_list = [operation_targets]
+        else:
+            break
+
+        print("First loop ok")
 
     return U_internal
 
@@ -571,7 +627,60 @@ def apply_decoherence(U, T_decoherence):
 import numpy as np
 import sympy as sp
 
+def is_t_present_in_matrix(H, t):
+    # If the matrix is a SymPy matrix
+    if isinstance(H, sp.Matrix):
+        # Check if the symbol 't' is present in the matrix
+        if t in H.free_symbols:
+            return True
+    # If the matrix is a NumPy array, check if it contains any SymPy expressions
+    elif isinstance(H, np.ndarray):
+        # Convert the NumPy array to a SymPy matrix to check for symbols
+        H_sympy = sp.Matrix(H)
+        if t in H_sympy.free_symbols:
+            return True
+    
+    return False
+
+def evaluate_matrix_for_t(H, t_value):
+    """Evaluate symbolic matrix with 't' substituted by its numerical value."""
+    if isinstance(H, sp.Matrix):  # Check if it's a SymPy matrix
+        return H.subs('t', t_value).evalf()  # Substitute and evaluate symbolically
+    elif isinstance(H, np.ndarray):  # If it's a NumPy array, convert to SymPy matrix first
+        H_sympy = sp.Matrix(H)
+        return H_sympy.subs('t', t_value).evalf()  # Substitute and evaluate symbolically
+    return H  # In case H is already numeric
+
+def taylor_expansion_exponent(exponent, n):
+    """
+    Expands e^(exponent) using the Taylor series up to degree n.
+    :param exponent: The matrix exponent (complex matrix)
+    :param n: The degree of the expansion
+    :return: The matrix exponential as a Taylor series expansion
+    """
+    # Initialize result as the identity matrix (I)
+    result = 1
+    
+    # Initialize term (first term is exponent^0 / 0! = I)
+    term = 1
+    
+    # Iterate over degrees 1 to n
+    for i in range(1, n+1):
+        term = np.dot(term, exponent) / i  # term = (exponent^i) / i!
+        print("Therm:", term)
+        result += term  # Add the term to the result
+    
+    return result
+
+# Example usage
+H_numeric = np.eye(16)  # Example: identity matrix as the exponent (numeric)
+n = 10  # Degree of expansion
+
+# Compute the Taylor expansion of e^exponent
+expanded_matrix = taylor_expansion_exponent(H_numeric, n)
+
 def trotter_suzuki(hamiltonians, t, k=10, eval_t=0):
+    from scipy.linalg import expm
     """
     Applies the first-order Trotter-Suzuki decomposition to a list of Hamiltonian matrices.
     
@@ -597,8 +706,17 @@ def trotter_suzuki(hamiltonians, t, k=10, eval_t=0):
     for _ in range(k):
         U_step = sp.eye(n)  # Start each step with identity
         for H in hamiltonians:
+            print("\n\nThe Hamiltonian is:", H)
+            if is_t_present_in_matrix(H = H, t = t):
+                H_numeric = evaluate_matrix_for_t(H = H, t_value = eval_t)
+            else:
+                H_numeric = H
+            print("The evaluated hamiltonian is:", H_numeric)
             #evolutions throught Trotter Suzuki
-            U_step = U_step @ sp.exp(-sp.I * (t / k) * H) 
+            exponent = -1j * (t / k) * H_numeric
+            exponential = taylor_expansion_exponent(exponent= exponent, n = 10)
+            print(exponential)
+            #U_step = U_step @ expm(-1j * (t / k) * H_numeric)
         #multiply k times
         U_trotter = U_step @ U_trotter  
     
@@ -660,3 +778,145 @@ def circuit_solver(qc, max_groups, max_groups_size, tot_qubits, T_decoherence,t,
             # Obtain the connectivity graph and update the best_grpup
             connectivity_graph = create_connectivity_graph(list_qc= list_qc_ordered_cpy)
             best_group_set = simulated_annealing_grouping(graph= connectivity_graph, max_groups= max_groups, max_group_size= max_groups_size, simulated_annealing_parameters= simulated_annealing_parameters())
+
+def circuit_solver_final(qc, max_groups, max_group_size, T_decoherence, t, k, fixed=True):
+    """
+    Solves the quantum circuit by progressively applying the evolution operations extracted 
+    from the circuit. First, it separates the circuit into an ordered list of operations and 
+    builds a connectivity graph to pre-allocate qubits into groups. Then, it repeatedly evolves 
+    each group and combines the internal evolutions via a Trotter–Suzuki decomposition until all 
+    operations have been processed.
+    
+    Parameters:
+      qc             : The quantum circuit (an instance of qiskit.QuantumCircuit).
+      max_groups     : Total number of groups (QPUs) to use.
+      max_group_size : Maximum number of qubits per group.
+      T_decoherence  : The decoherence time parameter.
+      t              : The time parameter used in the Trotter–Suzuki decomposition.
+      k              : Number of Trotter steps (improves accuracy if increased).
+      fixed          : If True, the qubit grouping remains constant during the evolution.
+    
+    Returns:
+      U_total        : The overall unitary evolution operator for the circuit.
+    """
+    # Separate the circuit into an ordered list of operations.
+    list_qc_ordered, _ = separate_qc_order(qc, verbose=False)
+    # Also separate by qubit (used for connectivity)
+    list_qc_unordered, _ = separate_qc(qc, verbose=False)
+    
+    # Build the connectivity graph from the unordered operations.
+    connectivity_graph = create_connectivity_graph(list_qc_unordered)
+    
+    # Use simulated annealing to group the qubits.
+    best_group_set, _ = simulated_annealing_grouping(
+        graph=connectivity_graph,
+        max_groups=max_groups,
+        max_group_size=max_group_size,
+        simulated_annealing_parameters=simulated_annealing_parameters()
+    )
+    
+    # The total number of qubits comes from the circuit.
+    tot_qubits = qc.num_qubits
+    # Initialize overall evolution operator to the identity.
+    U_total = np.eye(2 ** tot_qubits, dtype=complex)
+    
+    # Create a deep copy of the ordered list so that we can remove operations as they are processed.
+    remaining_ops = copy.deepcopy(list_qc_ordered)
+    
+    # Main loop: process until no operations remain.
+    while remaining_ops:
+        hamiltonians_list = []
+        # For each group in our best grouping, compute the evolution operator.
+        for group in best_group_set:
+            # evolve_internal_new expects a group (list of qubit indices) and the list of operations.
+            # It processes (and pops) the operations that act exclusively on qubits in the group.
+            U_internal = evolve_internal_new(
+                group=list(group),       # Convert set to list if needed
+                list_qc_ordered=remaining_ops,
+                tot_qubits=tot_qubits,
+                T_decoherence=T_decoherence,
+                decoherence=True
+            )
+            hamiltonians_list.append(U_internal)
+        
+        # Combine the evolution operators from each group using a Trotter–Suzuki decomposition.
+        U_trotter = trotter_suzuki(hamiltonians=hamiltonians_list, t=t, k=k, eval_t=t)
+        # Update the total evolution operator.
+        U_total = U_trotter @ U_total
+        
+        # (Optional) If groups are not fixed, update the connectivity and re-calculate the grouping.
+        if not fixed:
+            connectivity_graph = create_connectivity_graph(remaining_ops)
+            best_group_set, _ = simulated_annealing_grouping(
+                graph=connectivity_graph,
+                max_groups=max_groups,
+                max_group_size=max_group_size,
+                simulated_annealing_parameters=simulated_annealing_parameters()
+            )
+    
+    return U_total
+
+
+def statevector_evaluator(qc):
+    backend = Aer.get_backend('statevector_simulator')
+    result = execute(qc, backend=backend).result()
+    psi_qiskit = result.get_statevector(qc)
+
+    return psi_qiskit
+
+def get_probabilities(state_vector, tot_qubits, qubit_index):
+    """
+    Compute the probabilities that a given qubit is measured in |0> and |1>.
+    Assumes that the state vector is ordered with the rightmost bit as qubit 0.
+    
+    Parameters:
+      state_vector: A numpy array representing the state vector.
+      tot_qubits: Total number of qubits in the state.
+      qubit_index: The qubit index for which to compute probabilities.
+    
+    Returns:
+      A tuple (prob0, prob1) corresponding to the probability of measuring |0> and |1>.
+    """
+    prob0 = 0.0
+    prob1 = 0.0
+    # Loop over each basis state index and its amplitude
+    for i, amplitude in enumerate(state_vector):
+        # Convert the index to a binary string with tot_qubits bits.
+        state_str = format(i, '0' + str(tot_qubits) + 'b')
+        # The bit corresponding to qubit_index (with rightmost bit = qubit 0)
+        if state_str[-(qubit_index + 1)] == '0':
+            prob0 += np.abs(amplitude)**2
+        else:
+            prob1 += np.abs(amplitude)**2
+    return prob0, prob1
+
+def compare_results(U_total, statevector):
+    """
+    Compare the output probabilities obtained from Qiskit's statevector simulation
+    with the probabilities computed by applying the full unitary operator U_total.
+    
+    Parameters:
+      U_total: The total unitary matrix (numpy array) representing the evolution.
+      statevector: The final statevector from Qiskit's simulation.
+      
+    Prints the probability for each qubit being in |0> and |1> for both methods.
+    """
+    # Determine the total number of qubits (assuming statevector length is 2^n)
+    tot_qubits = int(np.log2(len(statevector)))
+    
+    # Compute the final state using the eigenvalue approach:
+    # Define the initial state |0...0>
+    psi_init = np.zeros(2**tot_qubits, dtype=complex)
+    psi_init[0] = 1.0
+    psi_eigen = U_total @ psi_init
+    
+    # Compare probabilities for each qubit:
+    for qubit in range(tot_qubits):
+        prob0_qiskit, prob1_qiskit = get_probabilities(statevector, tot_qubits, qubit)
+        prob0_eigen, prob1_eigen = get_probabilities(psi_eigen, tot_qubits, qubit)
+        
+        print(f"\nFor qubit {qubit}:")
+        print("  Qiskit simulation probabilities:")
+        print("    |0>: {:.4f}, |1>: {:.4f}".format(prob0_qiskit, prob1_qiskit))
+        print("  Eigenvalue method probabilities:")
+        print("    |0>: {:.4f}, |1>: {:.4f}".format(prob0_eigen, prob1_eigen))
